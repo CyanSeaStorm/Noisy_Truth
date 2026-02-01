@@ -2,19 +2,16 @@ import numpy as np
 from scipy.linalg import cholesky
 
 class UKF:
-    def __init__(self, n, m, fx, hx, Q, R,
-                 alpha=1e-3, beta=2.0, kappa=0.0):
-
+    def __init__(self, n, m, fx, hx, Q, R, alpha=1e-3, beta=2.0, kappa=0.0):
         self.n = n
         self.m = m
         self.fx = fx
         self.hx = hx
-
         self.Q = Q
         self.R = R
 
         self.x = np.zeros(n)
-        self.P = np.eye(n) * 1e-3
+        self.P = np.eye(n) * 0.1
 
         self.alpha = alpha
         self.beta = beta
@@ -28,54 +25,54 @@ class UKF:
         self.Wm[0] = self.lambda_ / (n + self.lambda_)
         self.Wc[0] = self.Wm[0] + (1 - alpha**2 + beta)
 
-    # ---------------- utilities ---------------- #
-
     def _sanitize_P(self):
-        if not np.isfinite(self.P).all():
-            self.P = np.eye(self.n) * 1e-3
+        # 1. Force Symmetry
         self.P = 0.5 * (self.P + self.P.T)
+        # 2. Check for NaNs or Infs
+        if not np.isfinite(self.P).all():
+            self.P = np.eye(self.n) * 0.1
+        # 3. Ensure positive definiteness
         self.P += np.eye(self.n) * 1e-9
 
     def _sigma_points(self):
         self._sanitize_P()
-        S = cholesky(self.P, lower=True)
+        try:
+            S = cholesky(self.P, lower=True)
+        except np.linalg.LinAlgError:
+            # If P is still not positive definite, use a larger jitter
+            self.P += np.eye(self.n) * 1e-5
+            S = cholesky(self.P, lower=True)
 
         sigmas = np.zeros((2*self.n + 1, self.n))
         sigmas[0] = self.x
-
         for i in range(self.n):
-            sigmas[i+1]        = self.x + self.gamma * S[:, i]
+            sigmas[i+1] = self.x + self.gamma * S[:, i]
             sigmas[self.n+i+1] = self.x - self.gamma * S[:, i]
-
         return sigmas
 
-    # ---------------- prediction ---------------- #
-
     def predict(self, dt, u=None):
-        if dt <= 1e-6:
+        if dt <= 0 or dt > 0.5: # Ignore unrealistic time jumps
             return
-
-        dt = np.clip(dt, 1e-3, 0.1)
-
+        
         sigmas = self._sigma_points()
         sigmas_f = np.array([self.fx(s, dt, u) for s in sigmas])
 
         self.x = np.sum(self.Wm[:, None] * sigmas_f, axis=0)
-
-        self.P = self.Q.copy()
+        
+        # Recompute P
+        new_P = self.Q.copy()
         for i in range(len(sigmas_f)):
             d = sigmas_f[i] - self.x
-            self.P += self.Wc[i] * np.outer(d, d)
-
-    # ---------------- update ---------------- #
+            new_P += self.Wc[i] * np.outer(d, d)
+        
+        self.P = new_P
 
     def update(self, z):
         if z is None or not np.isfinite(z).all():
             return
-
+            
         sigmas = self._sigma_points()
         Z = np.array([self.hx(s) for s in sigmas])
-
         z_pred = np.sum(self.Wm[:, None] * Z, axis=0)
 
         S = self.R.copy()
@@ -90,8 +87,6 @@ class UKF:
             Pxz += self.Wc[i] * np.outer(dx, dz)
 
         K = Pxz @ np.linalg.inv(S)
-
         self.x += K @ (z - z_pred)
         self.P -= K @ S @ K.T
         self._sanitize_P()
-
