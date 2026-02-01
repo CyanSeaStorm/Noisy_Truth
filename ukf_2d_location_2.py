@@ -1,57 +1,87 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import sys
 from ukf2 import UKF
 from process_model2 import imu_process_model
-import time
 
 def hx(x):
     return x[:2]
 
 # ---------------- File Loading ---------------- #
 def load_and_merge_data(imu_path, gt_path):
-    imu_raw = np.loadtxt(imu_path, comments='#')
-    gt_raw = np.loadtxt(gt_path, comments='#')
+    try:
+        imu_raw = np.loadtxt(imu_path, comments='#')
+        gt_raw = np.loadtxt(gt_path, comments='#')
+    except Exception as e:
+        print(f"Error: {e}")
+        return []
+
     combined = []
     for r in imu_raw:
         combined.append({'t': r[0], 'type': 'IMU', 'val': [r[1], r[2], 0.0]})
     for r in gt_raw:
         combined.append({'t': r[0], 'type': 'GT', 'val': [r[1], r[2]]})
+    
     combined.sort(key=lambda x: x['t'])
     return combined
 
 # ---------------- Initialization ---------------- #
 data_stream = load_and_merge_data('imu.txt', 'ground_truth.txt')
+ukf = UKF(n=7, m=2, fx=imu_process_model, hx=hx,
+          Q=np.diag([0.01, 0.01, 0.05, 0.05, 0.01, 1e-4, 1e-4]),
+          R=np.diag([0.05, 0.05]))
 
-ukf = UKF(
-    n=7, m=2, 
-    fx=imu_process_model, hx=hx,
-    Q=np.diag([0.01, 0.01, 0.05, 0.05, 0.01, 1e-4, 1e-4]),
-    R=np.diag([0.05, 0.05])
-)
-
-# Find start time
-t_start = None
 for entry in data_stream:
     if entry['type'] == 'GT':
         ukf.x[0:2] = entry['val']
         t_start = entry['t']
         break
 
-# Setup Real-time Plotting
-plt.ion() # Turn on interactive mode
-fig, axs = plt.subplots(2, 2, figsize=(12, 8))
-fig.suptitle("UKF Real-Time Localization", fontsize=16)
+# ---------------- High-Speed Plot Setup with Units ---------------- #
+plt.ion()
+fig, axs = plt.subplots(2, 2, figsize=(13, 9))
+fig.canvas.manager.set_window_title('High-Speed UKF Fusion (SI Units)')
 
-# Lists to store history for plotting
+# Plot 1: Trajectory
+line_gt_traj, = axs[0, 0].plot([], [], 'g-', label='GT', lw=1.5)
+line_est_traj, = axs[0, 0].plot([], [], 'r--', label='UKF', lw=1.5)
+axs[0, 0].set_title("2D Trajectory")
+axs[0, 0].set_xlabel("X Position [m]")
+axs[0, 0].set_ylabel("Y Position [m]")
+
+# Plot 2: Error
+line_err_x, = axs[0, 1].plot([], [], 'b', label='Err X', lw=1)
+line_err_y, = axs[0, 1].plot([], [], 'm', label='Err Y', lw=1)
+axs[0, 1].set_title("Estimation Error")
+axs[0, 1].set_xlabel("Time [s]")
+axs[0, 1].set_ylabel("Error [m]")
+
+# Plot 3: X vs Time
+line_x_gt, = axs[1, 0].plot([], [], 'g-', lw=1)
+line_x_est, = axs[1, 0].plot([], [], 'r--', lw=1)
+axs[1, 0].set_title("X tracking")
+axs[1, 0].set_xlabel("Time [s]")
+axs[1, 0].set_ylabel("X Position [m]")
+
+# Plot 4: Y vs Time
+line_y_gt, = axs[1, 1].plot([], [], 'g-', lw=1)
+line_y_est, = axs[1, 1].plot([], [], 'r--', lw=1)
+axs[1, 1].set_title("Y tracking")
+axs[1, 1].set_xlabel("Time [s]")
+axs[1, 1].set_ylabel("Y Position [m]")
+
+for ax in axs.flat:
+    ax.grid(True)
+    ax.legend(loc='upper right', fontsize='small')
+
 hist_t, hist_est, hist_gt = [], [], []
-
 t_prev = t_start
 last_imu = None
 
-print(f"{'Time':<10} | {'Type':<5} | {'Est X':<8} | {'Est Y':<8} | {'GT X':<8} | {'GT Y':<8}")
-print("-" * 70)
+print(f"\n{'TIMESTAMP [s]':<15} | {'STATUS':<7} | {'EST X [m]':<10} | {'EST Y [m]':<10}")
+print("="*65)
 
-# ---------------- Real-Time Loop ---------------- #
+# ---------------- Optimized Execution Loop ---------------- #
 for i, entry in enumerate(data_stream):
     if entry['t'] < t_start: continue
 
@@ -61,57 +91,42 @@ for i, entry in enumerate(data_stream):
     if dt > 0:
         ukf.predict(dt, u=last_imu)
     
-    gt_val = [np.nan, np.nan] # Placeholder if no GT this step
     if entry['type'] == 'GT':
         z = np.array(entry['val'])
         ukf.update(z)
-        gt_val = entry['val']
         
-        # Logging like ROS2
-        print(f"{t_curr % 1000:10.3f} | [GT]  | {ukf.x[0]:8.3f} | {ukf.x[1]:8.3f} | {gt_val[0]:8.3f} | {gt_val[1]:8.3f}")
+        # Fast sys.stdout logging
+        sys.stdout.write(f"{t_curr:<15.4f} | [OK]    | {ukf.x[0]:<10.4f} | {ukf.x[1]:<10.4f}\n")
         
-        # Save history for live plot
         hist_t.append(t_curr - t_start)
         hist_est.append(ukf.x[:2].copy())
-        hist_gt.append(gt_val)
+        hist_gt.append(z.copy())
     else:
         last_imu = entry['val']
-        # Optional: log IMU pulses
-        if i % 20 == 0: # Log every 20th IMU update to avoid flooding
-             print(f"{t_curr % 1000:10.3f} | [IMU] | {ukf.x[0]:8.3f} | {ukf.x[1]:8.3f} | {'-':^8} | {'-':^8}")
 
-    # Update Plot every N frames to save CPU
-    if i % 10 == 0 and len(hist_t) > 1:
+    # Update UI only every 50 frames for 5x speed boost
+    if i % 50 == 0 and len(hist_t) > 1:
         t_arr = np.array(hist_t)
         est_arr = np.array(hist_est)
         gt_arr = np.array(hist_gt)
 
-        # Clear and Redraw
-        for ax in axs.flat: ax.cla(); ax.grid(True)
+        line_gt_traj.set_data(gt_arr[:, 0], gt_arr[:, 1])
+        line_est_traj.set_data(est_arr[:, 0], est_arr[:, 1])
+        line_x_gt.set_data(t_arr, gt_arr[:, 0])
+        line_x_est.set_data(t_arr, est_arr[:, 0])
+        line_y_gt.set_data(t_arr, gt_arr[:, 1])
+        line_y_est.set_data(t_arr, est_arr[:, 1])
+        line_err_x.set_data(t_arr, est_arr[:, 0] - gt_arr[:, 0])
+        line_err_y.set_data(t_arr, est_arr[:, 1] - gt_arr[:, 1])
 
-        # 1. Trajectory
-        axs[0, 0].plot(gt_arr[:, 0], gt_arr[:, 1], 'g-', label='GT')
-        axs[0, 0].plot(est_arr[:, 0], est_arr[:, 1], 'r--', label='UKF')
-        axs[0, 0].set_title("Trajectory"); axs[0, 0].legend()
+        for ax in axs.flat:
+            ax.relim()
+            ax.autoscale_view()
 
-        # 2. X vs Time
-        axs[1, 0].plot(t_arr, gt_arr[:, 0], 'g')
-        axs[1, 0].plot(t_arr, est_arr[:, 0], 'r--')
-        axs[1, 0].set_title("X vs Time")
-
-        # 3. Y vs Time
-        axs[1, 1].plot(t_arr, gt_arr[:, 1], 'g')
-        axs[1, 1].plot(t_arr, est_arr[:, 1], 'r--')
-        axs[1, 1].set_title("Y vs Time")
-
-        # 4. Error
-        axs[0, 1].plot(t_arr, est_arr[:, 0] - gt_arr[:, 0], 'b', label='Err X')
-        axs[0, 1].plot(t_arr, est_arr[:, 1] - gt_arr[:, 1], 'm', label='Err Y')
-        axs[0, 1].set_title("Error"); axs[0, 1].legend()
-
-        plt.pause(0.001)
+        plt.pause(0.000001)
 
     t_prev = t_curr
 
+print("\nProcessing complete.")
 plt.ioff()
 plt.show()
